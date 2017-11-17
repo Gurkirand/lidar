@@ -2,32 +2,82 @@
 
 #include "../include/vlpmap.h"
 
+#include <pcl/io/pcd_io.h>
 #include <pcl/registration/icp.h>
-#include <pcl/visualization/pcl_visualizer.h>
+#include <pcl/registration/transforms.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/registration/icp_nl.h>
 
 namespace velodyne
 {
 
 vlpmap::vlpmap(const std::string& pcap)
+	: map(new cloud_type)
 {
 	grabber = boost::shared_ptr<grabber_type>( new grabber_type(pcap));
-	boost::function<void (const cloud_pointer&)> cloud_cb = boost::bind(&vlpmap::cloud_callback, this, _1);
+	boost::function<void (const cloud_const_pointer&)> cloud_cb = boost::bind(&vlpmap::cloud_callback, this, _1);
 	cloud_connection = grabber->registerCallback(cloud_cb);
+
+	/* map(new cloud_type); */
+
+	/* view(new visualizer_type("VLP Map")); */
+	/* view_handler(new handler_type("intensity")); */
+	view = visualizer_pointer(new visualizer_type("VLP Map"));
+
+	view_handler = handler_pointer(new handler_type("intensity"));
+
+    view->addCoordinateSystem( 3.0, "coordinate" );
+    view->setBackgroundColor(0.0, 0.0, 0.0, 0);
+    view->initCameraParameters();
+    view->setCameraPosition( 0.0, 0.0, 30.0, 0.0, 1.0, 0.0, 0 );
 }
 
 vlpmap::~vlpmap()
 {
-	delete grabber;
+	/* delete grabber; */
 }
 
-void vlpmap::cloud_callback(const cloud_pointer& cloud)
+void vlpmap::cloud_callback(const cloud_const_pointer& cloud)
 {
 	boost::mutex::scoped_lock lock(cloud_mutex);
-	_cloud = cloud;
+	_cloud = cloud_pointer(new cloud_type(*cloud));
 }
 
 void vlpmap::run()
 {
+	grabber->start();
+
+	while (grabber->isRunning())
+	{
+		cloud_pointer cloud;
+
+		if (cloud_mutex.try_lock())
+		{
+			cloud.swap(_cloud);
+			if (cloud)
+			{
+				register_cloud(cloud);
+			}
+			cloud_mutex.unlock();
+		}
+
+	}
+
+	grabber->stop();
+
+	if (cloud_connection.connected())
+	{
+		cloud_connection.disconnect();
+	}
+
+	std::cout << "Finished Mapping" << std::endl;
+	view->spin();
+}
+
+void vlpmap::step_run()
+{
+	std::cout << "Reading PCAP." << std::endl;
+
 	grabber->start();
 
 	while (grabber->isRunning())
@@ -46,8 +96,6 @@ void vlpmap::run()
 		}
 	}
 
-	std::cout << "Cloud stream size: " << cloud_stream.size() << std::endl;
-
 	grabber->stop();
 
 	if (cloud_connection.connected())
@@ -55,49 +103,98 @@ void vlpmap::run()
 		cloud_connection.disconnect();
 	}
 
-	icp();
+	std::cout << "Cloud stream size: " << cloud_stream.size() << std::endl;
+
+	char input = 's';
+	auto itr = cloud_stream.begin(),
+	     end = cloud_stream.end();
+
+	std::cout << "Enter s to step or q to quit." << std::endl;
+	for (auto itr = cloud_stream.begin(), end = cloud_stream.end();
+			!view->wasStopped() &&  itr != end; itr++)
+	{
+		std::cout << "> ";
+		std::cin >> input;
+		if (input == 'q')
+		{
+			break;
+		}
+
+		register_cloud(*itr);
+	}
+
+	view->spin();
 }
 
-void vlpmap::icp()
+void vlpmap::register_cloud(cloud_pointer target)
 {
-	auto c0 = cloud_stream[10];
-	auto c1 = cloud_stream[30];
+	if (map->empty())
+	{
+		std::cout << "EMPTY MAP" << std::endl;
+		map = target;
+		previous = target;
+		return;
+	}
+
+	Eigen::Matrix4f translate = Eigen::Matrix4f::Identity();
+	translate(1,3) = 0.5 * transforms;
+	transforms++;
+
+	pcl::transformPointCloud(*target, *target, translate);
 	
+	cloud_normal_type::Ptr map_normals(new cloud_normal_type);
+	cloud_normal_type::Ptr target_normals(new cloud_normal_type);
+
+	pcl::NormalEstimation<point_type, normal_type> estimator;
+	pcl::search::KdTree<point_type>::Ptr tree (new pcl::search::KdTree<point_type> ());
+	estimator.setSearchMethod (tree);
+	estimator.setKSearch (30);
+
+	estimator.setInputCloud(map);
+	estimator.compute(*map_normals);
+	pcl::copyPointCloud(*map, *map_normals);
+
+	estimator.setInputCloud(target);
+	estimator.compute(*target_normals);
+	pcl::copyPointCloud(*target, *target_normals);
+
 	pcl::IterativeClosestPoint<point_type, point_type> icp;
-	icp.setInputSource(c1);
-	icp.setInputTarget(c0);
-
-	cloud_type f;
-	icp.setMaxCorrespondenceDistance (0.05);
-	icp.setMaximumIterations (50);
+	/* pcl::IterativeClosestPoint<normal_type, normal_type> icp; */
+	icp.setMaxCorrespondenceDistance (1);
+	/* icp.setMaximumIterations (100); */
 	icp.setTransformationEpsilon (1e-8);
-	icp.setEuclideanFitnessEpsilon (1);
-	icp.align(f);
-	std::cout << "has converged: " << icp.hasConverged() << " score: " << icp.getFitnessScore() << std::endl;
+	icp.setEuclideanFitnessEpsilon (1e-2);
 
-	cloud_pointer cf(boost::make_shared<const cloud_type>(f));
 
-    boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer( new pcl::visualization::PCLVisualizer( "Velodyne Viewer" ) );
-    viewer->addCoordinateSystem( 3.0, "coordinate" );
-    viewer->setBackgroundColor(0.0, 0.0, 0.0, 0);
-    viewer->initCameraParameters();
-    viewer->setCameraPosition( 0.0, 0.0, 30.0, 0.0, 1.0, 0.0, 0 );
+	Eigen::Matrix4f t;
+	cloud_normal_pointer f_normals = map_normals;
+	cloud_pointer f(new cloud_type);
+	icp.setInputSource(previous);
+	icp.setInputTarget(target);
+	/* icp.setInputTarget(map_normals); */
+	/* icp.setInputSource(target_normals); */
 
-	pcl::visualization::PointCloudColorHandlerCustom<point_type> source (c0, 0, 255, 0);
-	pcl::visualization::PointCloudColorHandlerCustom<point_type> target (c1, 0, 0, 255);
-	pcl::visualization::PointCloudColorHandlerCustom<point_type> result (cf, 255, 0, 0);
-    /* pcl::visualization::PointCloudColorHandler<point_type>::Ptr handler; */
-    /*     boost::shared_ptr<pcl::visualization::PointCloudColorHandlerGenericField<point_type>> color_handler( new pcl::visualization::PointCloudColorHandlerGenericField<point_type>( "intensity" ) ); */
+	icp.align(*f);
+	/* icp.align(*f_normals); */
+	t = icp.getFinalTransformation();
+	pcl::transformPointCloud(*target, *f, t.inverse());
+	/* pcl::transformPointCloud(*target, *f, t); */
 
-	/* handler = color_handler; */
+	*map += *f;
 
-	viewer->addPointCloud(c0, target, "c0");
+	previous = target;
 
-	viewer->addPointCloud(c1, source, "c1");
+	/* cloud_type map_copy; */
+	/* pcl::copyPointCloud(*map, map_copy); */
+	/* cloud_type const& const_map_copy = map_copy; */
+	const_map = cloud_const_pointer(new cloud_type(*map));
 
-	viewer->addPointCloud(cf, result, "cf");
-
-	viewer->spin();
+	view->removePointCloud("map");
+	view_handler->setInputCloud(const_map);
+	view->addPointCloud(const_map, *view_handler, "map");
+	/* view->spinOnce(3000, true); */
+	view->spinOnce();
+	
 }
 
 } //velodyne

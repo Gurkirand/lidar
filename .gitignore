@@ -2,5 +2,7 @@ build/*
 !build/.gitkeep
 data/*
 !data/.gitkeep
+lib/*
+!lib/.gitkeep
 .DS_Store
 *.swp

@@ -29,7 +29,9 @@ int main(int argc, char* argv[])
     std::cout << "-pcap : " << pcap << std::endl;
 
 	velodyne::vlpmap vlpmap(pcap);
+	/* vlpmap.step_run(); */
 	vlpmap.run();
+	
 
 	return 0;
 }
