@@ -1,0 +1,6 @@
+build/*
+!build/.gitkeep
+data/*
+!data/.gitkeep
+.DS_Store
+*.swp
