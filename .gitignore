@@ -6,3 +6,5 @@ lib/*
 !lib/.gitkeep
 .DS_Store
 *.swp
+.syntastic_cpp_config
+playground/
