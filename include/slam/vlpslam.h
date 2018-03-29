@@ -15,7 +15,7 @@ namespace slam
 class vlp_slam
 {
 
-
+	std::vector<std::pair<CloudScans, ScanFeatures, ScanFeatures> > process_stack;
 
 
 }

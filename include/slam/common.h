@@ -5,6 +5,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <boost/make_shared.hpp>
+#include "scan_grabber.h"
 /* #include <pcl/io/vlp_grabber.h> */
 //#include <pcl/visualization/pcl_visualizer.h>
 
@@ -36,6 +37,16 @@ struct CloudScans
 		: scan_ind(other.scan_ind)
 	{
 		cloud = boost::make_shared<cloud_type>(*other.cloud);
+	}
+
+	CloudScans(scan_grabber::scan_array_ptr scans)
+		: cloud(new cloud_type())
+	{
+		for (int i = 0; i < scans->size(); i++)
+		{
+			*cloud += *(*scans)[i];
+			scan_ind[i] = cloud->points.size();
+		}
 	}
 
 	void reset_cloud()
